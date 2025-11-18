@@ -1,0 +1,195 @@
+version: '3.8'
+
+services:
+  # ===============================
+  # Backend API Service
+  # ===============================
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: graphrag-backend
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      - NEO4J_URI=bolt://neo4j:7687
+      - NEO4J_USERNAME=${NEO4J_USERNAME:-neo4j}
+      - NEO4J_PASSWORD=${NEO4J_PASSWORD:-research2025}
+      - REDIS_URL=redis://redis:6379
+      - OLLAMA_HOST=${OLLAMA_HOST:-http://host.docker.internal:11434}
+      - FRONTEND_URL=http://localhost:3000
+      - DEBUG=false
+      - LOG_LEVEL=INFO
+    volumes:
+      - data:/app/data
+      - logs:/app/logs
+    depends_on:
+      neo4j:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    networks:
+      - graphrag-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  # ===============================
+  # Frontend Service
+  # ===============================
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: graphrag-frontend
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      - NEXT_PUBLIC_API_URL=http://localhost:8000
+      - NEXT_PUBLIC_BACKEND_URL=http://localhost:8000
+      - NODE_ENV=production
+      - NEXT_TELEMETRY_DISABLED=1
+    depends_on:
+      backend:
+        condition: service_healthy
+    networks:
+      - graphrag-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  # ===============================
+  # Neo4j Graph Database
+  # ===============================
+  neo4j:
+    image: neo4j:5.20-enterprise
+    container_name: graphrag-neo4j
+    restart: unless-stopped
+    ports:
+      - "7474:7474"  # Neo4j Browser
+      - "7687:7687"  # Bolt protocol
+    environment:
+      - NEO4J_AUTH=${NEO4J_USERNAME:-neo4j}/${NEO4J_PASSWORD:-research2025}
+      # Enable APOC and Graph Data Science plugins
+      - NEO4J_PLUGINS=["apoc", "graph-data-science"]
+      # Memory configuration
+      - NEO4J_dbms_memory_heap_initial__size=512m
+      - NEO4J_dbms_memory_heap_max__size=2G
+      - NEO4J_dbms_memory_pagecache_size=1G
+      # Security
+      - NEO4J_dbms_security_procedures_unrestricted=apoc.*,gds.*
+      - NEO4J_dbms_security_allow__csv__import__from__file__urls=true
+    volumes:
+      - neo4j-data:/data
+      - neo4j-logs:/logs
+      - neo4j-plugins:/plugins
+    networks:
+      - graphrag-network
+    healthcheck:
+      test: ["CMD", "cypher-shell", "-u", "${NEO4J_USERNAME:-neo4j}", "-p", "${NEO4J_PASSWORD:-research2025}", "MATCH () RETURN count(*) as count"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+
+  # ===============================
+  # Redis Cache & Queue
+  # ===============================
+  redis:
+    image: redis:7-alpine
+    container_name: graphrag-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    command: >
+      redis-server
+        --appendonly yes
+        --maxmemory 512mb
+        --maxmemory-policy allkeys-lru
+        --tcp-keepalive 60
+    volumes:
+      - redis-data:/data
+    networks:
+      - graphrag-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+  # ===============================
+  # Ollama (Local LLM Service) - Optional
+  # ===============================
+  ollama:
+    image: ollama/ollama:latest
+    container_name: graphrag-ollama
+    restart: unless-stopped
+    ports:
+      - "11434:11434"
+    environment:
+      - OLLAMA_MAX_LOADED_MODELS=2
+      - OLLAMA_MAX_QUEUE=512
+    volumes:
+      - ollama-data:/root/.ollama
+    networks:
+      - graphrag-network
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 60s
+      timeout: 30s
+      retries: 3
+      start_period: 60s
+    profiles:
+      - with-ollama  # Only start when requested
+
+  # ===============================
+  # Nginx Reverse Proxy (Optional)
+  # ===============================
+  nginx:
+    image: nginx:alpine
+    container_name: graphrag-nginx
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./ssl:/etc/nginx/ssl:ro
+    depends_on:
+      - frontend
+      - backend
+    networks:
+      - graphrag-network
+    profiles:
+      - with-nginx  # Only start when requested
+
+networks:
+  graphrag-network:
+    driver: bridge
+    driver_opts:
+      com.docker.network.bridge.name: graphrag-net
+
+volumes:
+  neo4j-data:
+    driver: local
+  neo4j-logs:
+    driver: local
+  neo4j-plugins:
+    driver: local
+  redis-data:
+    driver: local
+  ollama-data:
+    driver: local
+  data:
+    driver: local
+  logs:
+    driver: local
