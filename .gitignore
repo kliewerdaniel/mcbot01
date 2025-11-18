@@ -5,7 +5,7 @@
 .env.production
 .env.staging
 *.env
-conversations.json
+
 # Python
 __pycache__/
 *.py[cod]
@@ -98,4 +98,5 @@ yarn-error.log*
 dump.rdb
 
 
+conversations.json
 reddit_export/
